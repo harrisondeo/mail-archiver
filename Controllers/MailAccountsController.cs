@@ -29,6 +29,7 @@ namespace MailArchiver.Controllers
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly IExportService _exportService;
     private readonly IAccessLogService _accessLogService;
+    private readonly IOutlookOAuth2Service _outlookOAuth2Service;
 
     public MailAccountsController(
         MailArchiverDbContext context,
@@ -43,7 +44,8 @@ namespace MailArchiver.Controllers
         IStringLocalizer<SharedResource> localizer,
         IServiceScopeFactory serviceScopeFactory,
         IExportService exportService,
-        IAccessLogService accessLogService)
+        IAccessLogService accessLogService,
+        IOutlookOAuth2Service outlookOAuth2Service)
     {
         _context = context;
         _emailService = emailService;
@@ -58,6 +60,7 @@ namespace MailArchiver.Controllers
         _serviceScopeFactory = serviceScopeFactory;
         _exportService = exportService;
         _accessLogService = accessLogService;
+        _outlookOAuth2Service = outlookOAuth2Service;
     }
 
         private async Task<bool> HasAccessToAccountAsync(int accountId)
@@ -183,14 +186,26 @@ var model = new MailAccountViewModel
         }
 
         // GET: MailAccounts/Create
-        public IActionResult Create()
+        public IActionResult Create(ProviderType? provider)
         {
             var model = new CreateMailAccountViewModel
             {
                 ImapPort = 993, // Standard values
                 UseSSL = true,
-                Provider = ProviderType.IMAP
+                Provider = provider ?? ProviderType.IMAP
             };
+            
+            // For Outlook accounts, pre-fill with OAuth2 tokens from session if available
+            if (provider == ProviderType.OUTLOOK)
+            {
+                var accessToken = HttpContext.Session.GetString("OutlookOAuthAccessToken");
+                if (!string.IsNullOrEmpty(accessToken))
+                {
+                    ViewBag.HasOAuth2Token = true;
+                    ViewBag.TokenExpiry = HttpContext.Session.GetString("OutlookOAuthTokenExpiry");
+                }
+            }
+            
             return View(model);
         }
 
@@ -220,6 +235,31 @@ var model = new MailAccountViewModel
                     LocalRetentionDays = model.LocalRetentionDays,
                     LastSync = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)
                 };
+                
+                // Handle Outlook OAuth2 tokens from session
+                if (model.Provider == ProviderType.OUTLOOK)
+                {
+                    var accessToken = HttpContext.Session.GetString("OutlookOAuthAccessToken");
+                    var refreshToken = HttpContext.Session.GetString("OutlookOAuthRefreshToken");
+                    var tokenExpiryStr = HttpContext.Session.GetString("OutlookOAuthTokenExpiry");
+                    
+                    if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(refreshToken))
+                    {
+                        ModelState.AddModelError("", "OAuth2 authorization required. Please click 'Authorize with Outlook' to continue.");
+                        return View(model);
+                    }
+                    
+                    account.AccessToken = accessToken;
+                    account.RefreshToken = refreshToken;
+                    account.TokenExpiry = string.IsNullOrEmpty(tokenExpiryStr) 
+                        ? DateTime.UtcNow 
+                        : DateTime.Parse(tokenExpiryStr, null, System.Globalization.DateTimeStyles.RoundtripKind);
+                    
+                    // Set IMAP server for Outlook
+                    account.ImapServer = "outlook.office365.com";
+                    account.ImapPort = 993;
+                    account.UseSSL = true;
+                }
 
                 // Validate local retention policy
                 if (account.LocalRetentionDays.HasValue && !account.DeleteAfterDays.HasValue)
@@ -255,10 +295,35 @@ var model = new MailAccountViewModel
                             return View(model);
                         }
                     }
+                    else if (account.Provider == ProviderType.OUTLOOK)
+                    {
+                        _logger.LogInformation("Testing OAuth2 connection for Outlook account: {Name}", model.Name);
+                        var connectionResult = await _emailService.TestConnectionAsync(account);
+                        if (!connectionResult)
+                        {
+                            _logger.LogWarning("OAuth2 connection test failed for Outlook account {Name}", model.Name);
+                            ModelState.AddModelError("", "Failed to connect to Outlook account. Please re-authorize.");
+                            
+                            // Clear session tokens
+                            HttpContext.Session.Remove("OutlookOAuthAccessToken");
+                            HttpContext.Session.Remove("OutlookOAuthRefreshToken");
+                            HttpContext.Session.Remove("OutlookOAuthTokenExpiry");
+                            
+                            return View(model);
+                        }
+                    }
 
                     _logger.LogInformation("Saving account to database");
                     _context.MailAccounts.Add(account);
                     await _context.SaveChangesAsync();
+                    
+                    // Clear OAuth2 tokens from session after successful account creation
+                    if (account.Provider == ProviderType.OUTLOOK)
+                    {
+                        HttpContext.Session.Remove("OutlookOAuthAccessToken");
+                        HttpContext.Session.Remove("OutlookOAuthRefreshToken");
+                        HttpContext.Session.Remove("OutlookOAuthTokenExpiry");
+                    }
 
                     // Auto-assign the account to the current user if they are a SelfManager (not Admin)
                     var authService = HttpContext.RequestServices.GetService<MailArchiver.Services.IAuthenticationService>();
@@ -1503,6 +1568,187 @@ var model = new MailAccountViewModel
                 _logger.LogError(ex, "Error loading folders for account {AccountId}", accountId);
                 return Json(new List<string> { "INBOX" });
             }
+        }
+
+        /// <summary>
+        /// Initiates OAuth2 authorization flow for Outlook personal accounts
+        /// </summary>
+        /// <param name="accountId">The account ID to authorize, or null for new accounts</param>
+        /// <returns>Redirect to OAuth2 authorization URL</returns>
+        [HttpGet]
+        public IActionResult InitiateOutlookOAuth(int? accountId)
+        {
+            try
+            {
+                // Generate a random state parameter for CSRF protection
+                var state = Guid.NewGuid().ToString("N");
+                
+                // Store state in session along with account ID (if re-authorizing)
+                HttpContext.Session.SetString("OutlookOAuthState", state);
+                if (accountId.HasValue)
+                {
+                    HttpContext.Session.SetInt32("OutlookOAuthAccountId", accountId.Value);
+                }
+
+                // Build redirect URI (must match the one registered in Azure)
+                var redirectUri = Url.Action("OutlookOAuthCallback", "MailAccounts", null, Request.Scheme);
+                
+                // Get authorization URL
+                var authUrl = _outlookOAuth2Service.GetAuthorizationUrl(redirectUri, state);
+                
+                _logger.LogInformation("Initiating Outlook OAuth2 flow for account {AccountId}", accountId);
+                
+                return Redirect(authUrl);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error initiating Outlook OAuth2 flow: {Message}", ex.Message);
+                TempData["ErrorMessage"] = $"Error starting OAuth2 authorization: {ex.Message}";
+                return RedirectToAction(nameof(Index));
+            }
+        }
+
+        /// <summary>
+        /// OAuth2 callback endpoint for Outlook authorization
+        /// </summary>
+        /// <param name="code">Authorization code from OAuth2 provider</param>
+        /// <param name="state">State parameter for CSRF validation</param>
+        /// <param name="error">Error code if authorization failed</param>
+        /// <param name="error_description">Error description if authorization failed</param>
+        /// <returns>Redirect to appropriate view</returns>
+        [HttpGet]
+        public async Task<IActionResult> OutlookOAuthCallback(string code, string state, string error, string error_description)
+        {
+            try
+            {
+                // Handle authorization errors
+                if (!string.IsNullOrEmpty(error))
+                {
+                    _logger.LogError("Outlook OAuth2 authorization failed: {Error} - {Description}", error, error_description);
+                    TempData["ErrorMessage"] = $"OAuth2 authorization failed: {error_description ?? error}";
+                    return RedirectToAction(nameof(Index));
+                }
+
+                // Validate state parameter for CSRF protection
+                var sessionState = HttpContext.Session.GetString("OutlookOAuthState");
+                if (string.IsNullOrEmpty(sessionState) || sessionState != state)
+                {
+                    _logger.LogWarning("Outlook OAuth2 state mismatch - possible CSRF attack");
+                    TempData["ErrorMessage"] = "Invalid authorization state. Please try again.";
+                    return RedirectToAction(nameof(Index));
+                }
+
+                // Exchange authorization code for tokens
+                var redirectUri = Url.Action("OutlookOAuthCallback", "MailAccounts", null, Request.Scheme);
+                var tokenResponse = await _outlookOAuth2Service.ExchangeCodeForTokensAsync(code, redirectUri);
+
+                // Get account ID from session if re-authorizing existing account
+                var accountId = HttpContext.Session.GetInt32("OutlookOAuthAccountId");
+
+                if (accountId.HasValue)
+                {
+                    // Update existing account with new tokens
+                    var account = await _context.MailAccounts.FindAsync(accountId.Value);
+                    if (account == null)
+                    {
+                        TempData["ErrorMessage"] = "Account not found";
+                        return RedirectToAction(nameof(Index));
+                    }
+
+                    account.AccessToken = tokenResponse.AccessToken;
+                    account.RefreshToken = tokenResponse.RefreshToken;
+                    account.TokenExpiry = tokenResponse.TokenExpiry;
+                    
+                    await _context.SaveChangesAsync();
+                    
+                    _logger.LogInformation("Updated OAuth2 tokens for account {AccountId}", accountId.Value);
+                    TempData["SuccessMessage"] = "Account successfully re-authorized";
+                    
+                    // Clear session data
+                    HttpContext.Session.Remove("OutlookOAuthState");
+                    HttpContext.Session.Remove("OutlookOAuthAccountId");
+                    
+                    return RedirectToAction(nameof(Details), new { id = accountId.Value });
+                }
+                else
+                {
+                    // Store tokens in session for new account creation
+                    HttpContext.Session.SetString("OutlookOAuthAccessToken", tokenResponse.AccessToken);
+                    HttpContext.Session.SetString("OutlookOAuthRefreshToken", tokenResponse.RefreshToken);
+                    HttpContext.Session.SetString("OutlookOAuthTokenExpiry", tokenResponse.TokenExpiry.ToString("O"));
+                    
+                    _logger.LogInformation("OAuth2 tokens obtained, redirecting to create account");
+                    TempData["SuccessMessage"] = "Authorization successful. Please complete the account setup.";
+                    
+                    // Clear state from session
+                    HttpContext.Session.Remove("OutlookOAuthState");
+                    
+                    // Redirect to create page with provider preset
+                    return RedirectToAction(nameof(Create), new { provider = ProviderType.OUTLOOK });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error handling Outlook OAuth2 callback: {Message}", ex.Message);
+                TempData["ErrorMessage"] = $"Error completing authorization: {ex.Message}";
+                
+                // Clear session data
+                HttpContext.Session.Remove("OutlookOAuthState");
+                HttpContext.Session.Remove("OutlookOAuthAccountId");
+                
+                return RedirectToAction(nameof(Index));
+            }
+        }
+
+        /// <summary>
+        /// Refreshes OAuth2 tokens for an Outlook account
+        /// </summary>
+        /// <param name="id">Account ID</param>
+        /// <returns>Redirect to account details</returns>
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public async Task<IActionResult> RefreshOutlookToken(int id)
+        {
+            if (!await HasAccessToAccountAsync(id))
+            {
+                return NotFound();
+            }
+
+            try
+            {
+                var account = await _context.MailAccounts.FindAsync(id);
+                if (account == null || account.Provider != ProviderType.OUTLOOK)
+                {
+                    TempData["ErrorMessage"] = "Invalid account or account type";
+                    return RedirectToAction(nameof(Index));
+                }
+
+                if (string.IsNullOrEmpty(account.RefreshToken))
+                {
+                    TempData["ErrorMessage"] = "No refresh token available. Please re-authorize the account.";
+                    return RedirectToAction(nameof(Details), new { id });
+                }
+
+                // Refresh the token
+                var tokenResponse = await _outlookOAuth2Service.RefreshAccessTokenAsync(account.RefreshToken);
+                
+                // Update account with new tokens
+                account.AccessToken = tokenResponse.AccessToken;
+                account.RefreshToken = tokenResponse.RefreshToken;
+                account.TokenExpiry = tokenResponse.TokenExpiry;
+                
+                await _context.SaveChangesAsync();
+                
+                _logger.LogInformation("Successfully refreshed OAuth2 tokens for account {AccountId}", id);
+                TempData["SuccessMessage"] = "Access token refreshed successfully";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error refreshing OAuth2 token for account {AccountId}: {Message}", id, ex.Message);
+                TempData["ErrorMessage"] = $"Error refreshing token: {ex.Message}. Please re-authorize the account.";
+            }
+
+            return RedirectToAction(nameof(Details), new { id });
         }
     }
 }
