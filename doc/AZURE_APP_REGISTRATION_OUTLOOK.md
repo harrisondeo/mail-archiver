@@ -75,6 +75,7 @@ After registration, you'll see the **Overview** page. Note down these values:
 4. Choose **Delegated permissions** (NOT Application permissions)
 5. Search for and add the following permissions:
    - **IMAP.AccessAsUser.All** - Allows the app to read and write access to mailboxes via IMAP
+     - *Note: This is an Outlook-specific permission, not a Microsoft Graph permission*
    - **offline_access** - Allows the app to maintain access to data it has been given access to
 6. Click **Add permissions**
 

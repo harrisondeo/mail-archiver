@@ -251,7 +251,9 @@ var model = new MailAccountViewModel
                     
                     account.AccessToken = accessToken;
                     account.RefreshToken = refreshToken;
-                    account.TokenExpiry = string.IsNullOrEmpty(tokenExpiryStr) ? DateTime.UtcNow : DateTime.Parse(tokenExpiryStr);
+                    account.TokenExpiry = string.IsNullOrEmpty(tokenExpiryStr) 
+                        ? DateTime.UtcNow 
+                        : DateTime.Parse(tokenExpiryStr, null, System.Globalization.DateTimeStyles.RoundtripKind);
                     
                     // Set IMAP server for Outlook
                     account.ImapServer = "outlook.office365.com";

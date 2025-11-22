@@ -21,6 +21,8 @@ namespace MailArchiver.Services
         private const string TokenEndpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
         
         // Required scopes for IMAP access
+        // Note: We use outlook.office.com scope (not graph.microsoft.com) because we're accessing 
+        // Outlook's native IMAP service directly, not through Microsoft Graph API
         private const string Scopes = "offline_access https://outlook.office.com/IMAP.AccessAsUser.All";
 
         public OutlookOAuth2Service(
