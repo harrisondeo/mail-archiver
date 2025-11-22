@@ -236,6 +236,8 @@ builder.Services.AddDbContext<MailArchiverDbContext>(options =>
 });
 
 // Services hinzufügen
+builder.Services.AddHttpClient(); // Add HttpClient for OAuth2Service
+builder.Services.AddScoped<IOutlookOAuth2Service, OutlookOAuth2Service>();
 builder.Services.AddScoped<IEmailService, EmailService>(provider =>
     new EmailService(
         provider.GetRequiredService<MailArchiverDbContext>(),
@@ -244,7 +246,8 @@ builder.Services.AddScoped<IEmailService, EmailService>(provider =>
         provider.GetRequiredService<IOptions<BatchOperationOptions>>(),
         provider.GetRequiredService<IOptions<MailSyncOptions>>(),
         provider.GetRequiredService<IGraphEmailService>(),
-        provider.GetRequiredService<MailArchiver.Utilities.DateTimeHelper>()
+        provider.GetRequiredService<MailArchiver.Utilities.DateTimeHelper>(),
+        provider.GetRequiredService<IOutlookOAuth2Service>()
     ));
 builder.Services.AddScoped<IGraphEmailService, GraphEmailService>(provider =>
     new GraphEmailService(

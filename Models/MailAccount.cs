@@ -32,6 +32,11 @@ public class MailAccount
     public string? ClientSecret { get; set; }
     public string? TenantId { get; set; }
     
+    // OAuth2 token fields for Outlook personal accounts
+    public string? AccessToken { get; set; }
+    public string? RefreshToken { get; set; }
+    public DateTime? TokenExpiry { get; set; }
+    
     [NotMapped]
     public List<string> ExcludedFoldersList
     {

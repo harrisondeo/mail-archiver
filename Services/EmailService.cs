@@ -31,6 +31,7 @@ namespace MailArchiver.Services
         private readonly MailSyncOptions _mailSyncOptions;
         private readonly IGraphEmailService _graphEmailService;
         private readonly DateTimeHelper _dateTimeHelper;
+        private readonly IOutlookOAuth2Service _outlookOAuth2Service;
 
         public EmailService(
             MailArchiverDbContext context,
@@ -39,7 +40,8 @@ namespace MailArchiver.Services
             IOptions<BatchOperationOptions> batchOptions,
             IOptions<MailSyncOptions> mailSyncOptions,
             IGraphEmailService graphEmailService,
-            DateTimeHelper dateTimeHelper)
+            DateTimeHelper dateTimeHelper,
+            IOutlookOAuth2Service outlookOAuth2Service)
         {
             _context = context;
             _logger = logger;
@@ -48,6 +50,7 @@ namespace MailArchiver.Services
             _mailSyncOptions = mailSyncOptions.Value;
             _graphEmailService = graphEmailService;
             _dateTimeHelper = dateTimeHelper;
+            _outlookOAuth2Service = outlookOAuth2Service;
         }
 
         /// <summary>
@@ -65,7 +68,7 @@ namespace MailArchiver.Services
 
         /// <summary>
         /// Authenticates the IMAP client using a fallback authentication strategy.
-        /// Note: M365 accounts should use GraphEmailService, not IMAP.
+        /// Supports OAuth2 for Outlook personal accounts, Graph API for M365, and traditional methods for IMAP.
         /// For other providers, tries SASL PLAIN first (for Exchange compatibility), 
         /// then falls back to auto-negotiation if PLAIN fails (for T-Online and others).
         /// </summary>
@@ -78,6 +81,30 @@ namespace MailArchiver.Services
             // which can fail in containerized environments due to missing libraries
             client.AuthenticationMechanisms.Remove("GSSAPI");
             client.AuthenticationMechanisms.Remove("NEGOTIATE");
+            
+            // Handle OAuth2 authentication for Outlook personal accounts
+            if (account.Provider == ProviderType.OUTLOOK)
+            {
+                _logger.LogDebug("Attempting OAuth2 authentication for Outlook account {AccountName}", account.Name);
+                
+                // Get a valid access token (will refresh if needed)
+                var accessToken = await _outlookOAuth2Service.GetValidAccessTokenAsync(account);
+                var username = account.EmailAddress;
+                
+                // Use SASL XOAUTH2 mechanism for OAuth2 authentication
+                if (client.AuthenticationMechanisms.Contains("XOAUTH2"))
+                {
+                    var oauth2 = new SaslMechanismOAuth2(username, accessToken);
+                    await client.AuthenticateAsync(oauth2);
+                    _logger.LogDebug("OAuth2 authentication successful for account {AccountName}", account.Name);
+                    return;
+                }
+                else
+                {
+                    _logger.LogError("XOAUTH2 authentication mechanism not available for account {AccountName}", account.Name);
+                    throw new InvalidOperationException($"IMAP server does not support OAuth2 authentication (XOAUTH2 mechanism not available)");
+                }
+            }
             
             var username = GetAuthenticationUsername(account);
             var password = account.Password;
