@@ -32,6 +32,7 @@
 ### 🧩 Email Provider Support
 - **IMAP**: Traditional IMAP accounts with full synchronization capabilities
 - **M365**: Microsoft 365 mail accounts via Microsoft Graph API ([Setup Guide](doc/AZURE_APP_REGISTRATION_M365.md))
+- **OUTLOOK**: Outlook.com personal accounts with OAuth2 authentication ([Setup Guide](doc/AZURE_APP_REGISTRATION_OUTLOOK.md))
 - **IMPORT**: Import-only accounts for migrating existing email archives
 
 ### 📥 Import & Restore Functions

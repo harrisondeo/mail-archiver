@@ -89,12 +89,12 @@ namespace MailArchiver.Services
                 
                 // Get a valid access token (will refresh if needed)
                 var accessToken = await _outlookOAuth2Service.GetValidAccessTokenAsync(account);
-                var username = account.EmailAddress;
+                var oauthUsername = account.EmailAddress;
                 
                 // Use SASL XOAUTH2 mechanism for OAuth2 authentication
                 if (client.AuthenticationMechanisms.Contains("XOAUTH2"))
                 {
-                    var oauth2 = new SaslMechanismOAuth2(username, accessToken);
+                    var oauth2 = new SaslMechanismOAuth2(oauthUsername, accessToken);
                     await client.AuthenticateAsync(oauth2);
                     _logger.LogDebug("OAuth2 authentication successful for account {AccountName}", account.Name);
                     return;
